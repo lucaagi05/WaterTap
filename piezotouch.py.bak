@@ -1,0 +1,89 @@
+import serial
+import tkinter as tk
+import threading
+
+# --- CONFIGURATION ---
+SERIAL_PORT = 'COM8'  # Update to your active port
+BAUD_RATE = 115200
+GRID_SIZE = 400       
+
+# Low-Pass Filter Weight: lower means smoother tracking but slightly more lag (0.01 to 1.0)
+FILTER_SMOOTHING = 0.45  
+
+class SmoothedImpactApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Piezo Matrix: Stabilized Low-Pass Grid")
+        
+        self.canvas = tk.Canvas(root, width=GRID_SIZE, height=GRID_SIZE, bg="#111111")
+        self.canvas.pack()
+        
+        # Bounding crosshairs
+        self.canvas.create_line(GRID_SIZE/2, 0, GRID_SIZE/2, GRID_SIZE, fill="#252525", dash=(2, 2))
+        self.canvas.create_line(0, GRID_SIZE/2, GRID_SIZE, GRID_SIZE/2, fill="#252525", dash=(2, 2))
+        
+        self.status = self.canvas.create_text(GRID_SIZE/2, GRID_SIZE-20, text="Stabilized Matrix Online", fill="#00FF00", font=("Arial", 10))
+        self.marker = None
+        
+        # Store historical virtual coordinates for filtering
+        self.current_display_x = GRID_SIZE / 2
+        self.current_display_y = GRID_SIZE / 2
+        
+        # Default bounding limits
+        self.min_raw_x, self.max_raw_x = -350, 350
+        self.min_raw_y, self.max_raw_y = -450, 350
+
+        self.running = True
+        self.serial_thread = threading.Thread(target=self.read_serial, daemon=True)
+        self.serial_thread.start()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def read_serial(self):
+        try:
+            ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+        except Exception as e:
+            return
+
+        while self.running:
+            if ser.in_waiting > 0:
+                line = ser.readline().decode('utf-8', errors='ignore').strip()
+                if "," in line:
+                    try:
+                        parts = line.split(",")
+                        raw_x = int(parts[0])
+                        raw_y = int(parts[1])
+                        
+                        # Normalize inputs inside baseline properties
+                        norm_x = (raw_x - self.min_raw_x) / max(1, (self.max_raw_x - self.min_raw_x))
+                        norm_y = (raw_y - self.min_raw_y) / max(1, (self.max_raw_y - self.min_raw_y))
+                        
+                        norm_x = max(0.0, min(1.0, norm_x))
+                        norm_y = max(0.0, min(1.0, norm_y))
+                        
+                        # Establish target pixel coordinates
+                        target_x = norm_x * GRID_SIZE
+                        target_y = (1.0 - norm_y) * GRID_SIZE
+                        
+                        # Apply Exponential Moving Average (Low-Pass Filter Equation)
+                        # New Position = (Target * Weight) + (Old Position * (1 - Weight))
+                        self.current_display_x = (target_x * FILTER_SMOOTHING) + (self.current_display_x * (1.0 - FILTER_SMOOTHING))
+                        self.current_display_y = (target_y * FILTER_SMOOTHING) + (self.current_display_y * (1.0 - FILTER_SMOOTHING))
+                        
+                        self.root.after(0, self.draw_impact, self.current_display_x, self.current_display_y)
+                    except (ValueError, IndexError):
+                        pass
+        ser.close()
+
+    def draw_impact(self, x, y):
+        if self.marker: self.canvas.delete(self.marker)
+        r = 12
+        self.marker = self.canvas.create_oval(x-r, y-r, x+r, y+r, fill="#FF3333", outline="#FFFFFF", width=2)
+
+    def on_close(self):
+        self.running = False
+        self.root.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SmoothedImpactApp(root)
+    root.mainloop()
